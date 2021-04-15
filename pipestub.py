@@ -1,11 +1,12 @@
-import ArgumentParser from argparse
+
+from argparse import ArgumentParser
 import hjson
 import sys
-import Enum from enum
 import logging
-import datetime
+from datetime import datetime
+import re
 
-def val_or_none(dict, key):
+def val_or_else(dict, key):
 	return dict[key] if key in dict else None
 
 class State:
@@ -18,31 +19,31 @@ class State:
 		self.loop = loop
 		self.exit = exit
 		self.transitions = transitions
-
-	@classmethod
-	def from_dict(dict):
-		transitions = []
-		for (pattern, state) in dict.items():
-			if pattern not in ("name", "entry", "loop", "exit"):
-				transitions.append(Transition(re.compile(pattern), state, state)
-		return State(
-				val_or_none(dict, "name"),
-				val_or_none(dict, "entry"),
-				val_or_none(dict, "loop"),
-				val_or_none(dict, "exit"),
-				transitions
-			)
 	
-	def next(self, in, default=None):
+	def next(self, input, default=None):
 		"""
 		given a input looks for a transition to fire now. If none is found return default.
 		"""
 		for t in self.transitions:
-			if t.applies(in):
+			if t.applies(input):
 				return t
 		return default
-	
-	def transate_trans(self, dict):
+
+	@staticmethod
+	def from_dict(dict, entry_on_loop=False, loop_on_entry=False):
+		transitions = []
+		for (pattern, state) in dict.items():
+			if pattern not in ("name", "entry", "loop", "exit"):
+				transitions.append(Transition(re.compile(pattern), state, state))
+		return State(
+			val_or_else(dict, "name", None),
+			val_or_else(dict, "entry", val_or_else(dict, "loop", None) if loop_on_entry else None),
+			val_or_else(dict, "loop", val_or_else(dict, "entry", None) if entry_on_loop else None),
+			val_or_else(dict, "exit"),
+			transitions
+		)
+
+	def translate_trans(self, dict):
 		"""
 		replace all transition targets according to a dict.
 		"""
@@ -56,22 +57,19 @@ class Transition:
 		self.name = name
 		self.target = target
 	
-    def get(self):
-    	return self.target
+	def get(self):
+		return self.target
 
-	def applies(self, in):
-		return self.matcher.matches(in)
-	
+	def applies(self, input):
+		return self.matcher.matches(input)
+
 	def translate_target(self, dict):
 		self.target = dict[self.target]
 
 
+def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, logdump=sys.stderr, raw=False, default_transition="ignore"):
 
-def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, logdump=sys.stderr, hex=false):
-	
-	cstate = states[initial]
-
-	if not hex:
+	if not raw:
 		for s in states:
 			if s.entry:
 				s.entry = bytes.fromhex(s.entry)
@@ -80,6 +78,8 @@ def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, log
 			if s.exit:
 				s.entry = bytes.fromhex(s.exit)
 
+	cstate = states[initial]
+
 	while cstate:
 		if cstate.entry:
 			logdump.write(f"entry {datetime.now()} {cstate.entry}")
@@ -87,10 +87,14 @@ def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, log
 		
 		while True:
 			cin = in_stream.read()
-			if not hex:
-				cin = cin.hex()
+			if not raw:
+				cin = bytes(cin).hex()
 			logdump.write(f"in {datetime.now()} {cin}")
-			ctrans = cstate.next(cin)
+			ctrans = cstate.next(cin, default=cstate)
+
+			if not ctrans:
+				logging.warning(f"unhandled input {cin} in state {cstate.name}, assuming {default_transition}")
+				ctrans = Transition(None, default_transition, cstate)
 
 			if ctrans.get() == cstate:
 				if ctrans.name == "loop":
@@ -98,9 +102,8 @@ def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, log
 						logdump.write(f"loop {datetime.now()} {cstate.loop}")
 						out_stream.write(cstate.loop)
 				elif ctrans.name == "reject":
-					logger.error(f"rejected {cin} in state {cstate.name}, terminating")
-				elif ctrans.name == "default":
-					logging.warn(f"unhandled input {cin} in state {cstate.name}, assuming ignore")
+					logging.error(f"rejected {cin} in state {cstate.name}, terminating")
+
 			else:
 				break
 
@@ -109,30 +112,42 @@ def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, log
 			out_stream.write(cstate.exit)
 		
 		cstate = ctrans.get()
-	
 
-if __name__ == '__main__':
-	parser = argparse.ArgumentParser()
-	parser.add_argument("state_file", help="File to load the states from")
-	#parser.add_argument("-l", "--log", help="File to log to")
-	#parser.add_argument("-h", "--hex" help="output in hex instead of binary")
-	
-	args = parser.parse_args()
-	
-	with open(args.state_file) as f:
-		rawstates = hjson.load(f)
-		states = map(State.from_dict, rawstates)
-	
-	name_dict = {}
+def assemble_states_from_hjson(raw_states, entry_on_loop=False, loop_on_entry=False):
+	states = list(map(
+		lambda r: State.from_dict(r, loop_on_entry=loop_on_entry, entry_on_loop=entry_on_loop),
+		raw_states
+	))
+
+	name_dict = {
+		"reject": None
+	}
 	for s in states:
 		if s.name:
 			name_dict[s.name] = s
-	
+
 	for i, s in enumerate(states):
-		name_dict["accept"] = states[i+1] if i < len(states) else None
+		name_dict["accept"] = states[i + 1] if i < len(states) else None
 		name_dict["loop"] = states[i]
 		name_dict["ignore"] = states[i]
-		name:dict["reject"] = None
-		s.transate_trans(name_dict)
-	
-	pipe_stub(states)
+		s.translate_trans(name_dict)
+
+	return states
+
+
+if __name__ == '__main__':
+	parser = ArgumentParser()
+	parser.add_argument("state_file", help="File to load the states from")
+	#parser.add_argument("-l", "--log", help="File to log to")
+	parser.add_argument("-r", "--raw", help="output raw like in file instead of converting from hex to bin")
+	parser.add_argument("-d", "--default", help="what to do when no transition matches")
+	parser.add_argument("--loop-on-entry", help="when no entry action is given, trigger loop action")
+	parser.add_argument("--entry-on-loop", help="when no loop action is given but one it triggered, use entry")
+	args = parser.parse_args()
+
+	with open(args.state_file) as f:
+		raw_states = hjson.load(f)
+
+	states = assemble_states_from_hjson(raw_states, entry_on_loop=args.entry_on_loop, loop_on_entry=args.loop_on_entry)
+
+	pipe_stub(states, raw=args.raw, default_transition=args.default)

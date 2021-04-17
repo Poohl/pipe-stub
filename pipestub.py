@@ -5,9 +5,10 @@ import sys
 import logging
 from datetime import datetime
 import re
+import os
 
-def val_or_else(dict, key):
-	return dict[key] if key in dict else None
+def val_or_else(dict, key, default=None):
+	return dict[key] if key in dict else default
 
 class State:
 	"""
@@ -19,7 +20,7 @@ class State:
 		self.loop = loop
 		self.exit = exit
 		self.transitions = transitions
-	
+
 	def next(self, input, default=None):
 		"""
 		given a input looks for a transition to fire now. If none is found return default.
@@ -36,9 +37,9 @@ class State:
 			if pattern not in ("name", "entry", "loop", "exit"):
 				transitions.append(Transition(re.compile(pattern), state, state))
 		return State(
-			val_or_else(dict, "name", None),
-			val_or_else(dict, "entry", val_or_else(dict, "loop", None) if loop_on_entry else None),
-			val_or_else(dict, "loop", val_or_else(dict, "entry", None) if entry_on_loop else None),
+			val_or_else(dict, "name"),
+			val_or_else(dict, "entry", val_or_else(dict, "loop") if loop_on_entry else None),
+			val_or_else(dict, "loop", val_or_else(dict, "entry") if entry_on_loop else None),
 			val_or_else(dict, "exit"),
 			transitions
 		)
@@ -50,13 +51,13 @@ class State:
 		for t in self.transitions:
 			t.translate_target(dict)
 
-	
+
 class Transition:
 	def __init__(self, matcher, name, target):
 		self.matcher = matcher
 		self.name = name
 		self.target = target
-	
+
 	def get(self):
 		return self.target
 
@@ -67,7 +68,7 @@ class Transition:
 		self.target = dict[self.target]
 
 
-def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, logdump=sys.stderr, raw=False, default_transition="ignore"):
+def pipe_stub(states, initial=0, in_stream=os.fdopen(sys.stdin.fileno(), 'rb'), out_stream=os.fdopen(sys.stdout.fileno(), 'wb'), logdump=sys.stderr, raw=False, default_transition="ignore"):
 
 	if not raw:
 		for s in states:
@@ -83,8 +84,8 @@ def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, log
 	while cstate:
 		if cstate.entry:
 			logdump.write(f"entry {datetime.now()} {cstate.entry}")
-			in_stream.write(cstate.entry)
-		
+			out_stream.write(cstate.entry)
+
 		while True:
 			cin = in_stream.read()
 			if not raw:
@@ -110,7 +111,7 @@ def pipe_stub(states, initial=0, in_stream=sys.stdin, out_stream=sys.stdout, log
 		if cstate.exit:
 			logdump.write(f"exit {datetime.now()} {cstate.exit}")
 			out_stream.write(cstate.exit)
-		
+
 		cstate = ctrans.get()
 
 def assemble_states_from_hjson(raw_states, entry_on_loop=False, loop_on_entry=False):
@@ -127,7 +128,7 @@ def assemble_states_from_hjson(raw_states, entry_on_loop=False, loop_on_entry=Fa
 			name_dict[s.name] = s
 
 	for i, s in enumerate(states):
-		name_dict["accept"] = states[i + 1] if i < len(states) else None
+		name_dict["accept"] = states[i + 1] if (i+1) < len(states) else None
 		name_dict["loop"] = states[i]
 		name_dict["ignore"] = states[i]
 		s.translate_trans(name_dict)
@@ -147,7 +148,7 @@ if __name__ == '__main__':
 
 	with open(args.state_file) as f:
 		raw_states = hjson.load(f)
-
+		print(raw_states)
 	states = assemble_states_from_hjson(raw_states, entry_on_loop=args.entry_on_loop, loop_on_entry=args.loop_on_entry)
 
 	pipe_stub(states, raw=args.raw, default_transition=args.default)

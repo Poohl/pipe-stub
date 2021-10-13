@@ -68,28 +68,17 @@ class Transition:
 		self.target = dict[self.target]
 
 
-def pipe_stub(states, initial=0, in_stream=os.fdopen(sys.stdin.fileno(), 'rb'), out_stream=os.fdopen(sys.stdout.fileno(), 'wb'), logdump=sys.stderr, raw=False, default_transition="ignore"):
-
-	if not raw:
-		for s in states:
-			if s.entry:
-				s.entry = bytes.fromhex(s.entry)
-			if s.loop:
-				s.entry = bytes.fromhex(s.loop)
-			if s.exit:
-				s.entry = bytes.fromhex(s.exit)
+def pipe_stub(states, read=lambda: input(), write=lambda b: print(b), initial=0, logdump=sys.stderr, default_transition="ignore"):
 
 	cstate = states[initial]
 
 	while cstate:
 		if cstate.entry:
 			logdump.write(f"entry {datetime.now()} {cstate.entry}")
-			out_stream.write(cstate.entry)
+			write(cstate.entry)
 
 		while True:
-			cin = in_stream.read()
-			if not raw:
-				cin = bytes(cin).hex()
+			cin = read()
 			logdump.write(f"in {datetime.now()} {cin}")
 			ctrans = cstate.next(cin, default=cstate)
 
@@ -101,7 +90,7 @@ def pipe_stub(states, initial=0, in_stream=os.fdopen(sys.stdin.fileno(), 'rb'), 
 				if ctrans.name == "loop":
 					if cstate.loop:
 						logdump.write(f"loop {datetime.now()} {cstate.loop}")
-						out_stream.write(cstate.loop)
+						write(cstate.loop)
 				elif ctrans.name == "reject":
 					logging.error(f"rejected {cin} in state {cstate.name}, terminating")
 
@@ -110,7 +99,7 @@ def pipe_stub(states, initial=0, in_stream=os.fdopen(sys.stdin.fileno(), 'rb'), 
 
 		if cstate.exit:
 			logdump.write(f"exit {datetime.now()} {cstate.exit}")
-			out_stream.write(cstate.exit)
+			write(cstate.exit)
 
 		cstate = ctrans.get()
 
@@ -135,20 +124,45 @@ def assemble_states_from_hjson(raw_states, entry_on_loop=False, loop_on_entry=Fa
 
 	return states
 
+def hexer(read, write):
+	"""
+	Given a binary read/write pair returns an equivalent hexadecimaly encoded read/write pair
+	"""
+	return lambda: bytes(read()).hex(), lambda b: write(bytes.fromhex(b))
+
+def dehexer(read, write):
+	"""
+	given a hexadecimal read/write pair, returns an equivalent binary read/write pair
+	"""
+	return lambda: bytes.fromhex(read()), lambda h: write(bytes(h).hex())
+
+def remove_python_comments(s):
+	return re.sub(r'#[^"\n]\n', "\n", s)
 
 if __name__ == '__main__':
 	parser = ArgumentParser()
 	parser.add_argument("state_file", help="File to load the states from")
 	#parser.add_argument("-l", "--log", help="File to log to")
-	parser.add_argument("-r", "--raw", help="output raw like in file instead of converting from hex to bin")
+	parser.add_argument("-r", "--raw", help="output raw like in file instead of converting filecontents from hex to bin")
 	parser.add_argument("-d", "--default", help="what to do when no transition matches")
 	parser.add_argument("--loop-on-entry", help="when no entry action is given, trigger loop action")
 	parser.add_argument("--entry-on-loop", help="when no loop action is given but one it triggered, use entry")
+	parser.add_argument("-m", "--mimify" help="if comments should be stripped from the statefile.")
 	args = parser.parse_args()
 
 	with open(args.state_file) as f:
-		raw_states = hjson.load(f)
+		if args.mimify:
+			s = f.read()
+			s = remove_python_comments(s)
+			raw_states = hjson.loads(s)
+		else:
+			raw_states = hjson.load(f)
 		print(raw_states)
+
 	states = assemble_states_from_hjson(raw_states, entry_on_loop=args.entry_on_loop, loop_on_entry=args.loop_on_entry)
 
-	pipe_stub(states, raw=args.raw, default_transition=args.default)
+	r, w = sys.stdin.buffer.read, sys.stdout.buffer.write
+	if not args.raw:
+		r, w = dehexer(r, w)
+
+	pipe_stub(states, r, w, default_transition=args.default)

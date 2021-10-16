@@ -62,52 +62,67 @@ class Transition:
 		return self.target
 
 	def applies(self, input):
-		return self.matcher.matches(input)
+		return self.matcher.fullmatch(input)
 
 	def translate_target(self, dict):
 		self.target = dict[self.target]
 
 
-def pipe_stub(states, read=lambda: input(), write=lambda b: print(b), initial=0, logdump=sys.stderr, default_transition="ignore"):
+def pipe_stub(states, read=lambda: input(), write=lambda b: print(b), initial=0, logdump=sys.stderr, default_transition="ignore", interactive=False):
 
 	cstate = states[initial]
 
 	while cstate:
 		if cstate.entry:
-			logdump.write(f"entry {datetime.now()} {cstate.entry}")
+			logdump.write(f"entry {datetime.now()} {cstate.entry}\n")
 			write(cstate.entry)
 
 		while True:
 			cin = read()
-			logdump.write(f"in {datetime.now()} {cin}")
-			ctrans = cstate.next(cin, default=cstate)
+			logdump.write(f"in {datetime.now()} {cin}\n")
+			ctrans = cstate.next(cin, default=None)
 
 			if not ctrans:
-				logging.warning(f"unhandled input {cin} in state {cstate.name}, assuming {default_transition}")
+				logdump.write(f"unhandled input {cin} in state {cstate.name}, assuming {default_transition}\n")
 				ctrans = Transition(None, default_transition, cstate)
 
 			if ctrans.get() == cstate:
 				if ctrans.name == "loop":
 					if cstate.loop:
-						logdump.write(f"loop {datetime.now()} {cstate.loop}")
+						logdump.write(f"loop {datetime.now()} {cstate.loop}\n")
 						write(cstate.loop)
 				elif ctrans.name == "reject":
-					logging.error(f"rejected {cin} in state {cstate.name}, terminating")
-
+					logdump.write(f"rejected {cin} in state {cstate.name}, terminating\n")
+				if interactive:
+					input()
 			else:
 				break
 
+		if interactive:
+			input()
+			
 		if cstate.exit:
-			logdump.write(f"exit {datetime.now()} {cstate.exit}")
+			logdump.write(f"exit {datetime.now()} {cstate.exit}\n")
 			write(cstate.exit)
 
 		cstate = ctrans.get()
 
 def assemble_states_from_hjson(raw_states, entry_on_loop=False, loop_on_entry=False):
-	states = list(map(
+		
+	states = map(
 		lambda r: State.from_dict(r, loop_on_entry=loop_on_entry, entry_on_loop=entry_on_loop),
 		raw_states
-	))
+	)
+	
+	def set_state_name_if_None(z):
+		s, n = z
+		if not s.name:
+			s.name = n
+		return s
+
+	states = map(set_state_name_if_None, zip(states, range(len(raw_states))))
+
+	states = list(states)
 
 	name_dict = {
 		"reject": None
@@ -147,7 +162,8 @@ if __name__ == '__main__':
 	parser.add_argument("-d", "--default", help="what to do when no transition matches")
 	parser.add_argument("--loop-on-entry", help="when no entry action is given, trigger loop action")
 	parser.add_argument("--entry-on-loop", help="when no loop action is given but one it triggered, use entry")
-	parser.add_argument("-m", "--mimify" help="if comments should be stripped from the statefile.")
+	parser.add_argument("-m", "--mimify", help="if comments should be stripped from the statefile.")
+	parser.add_argument("-I", "--interactive", help="Run interactively, requiereing confirmation for every action")
 	args = parser.parse_args()
 
 	with open(args.state_file) as f:
